@@ -1,23 +1,46 @@
 import { createClientFromRequest } from 'npm:@base44/sdk@0.8.25';
 
 // ─── AI HUB ONLY — All writes go to Nexus Command. Never the 5S Portal. ──────
-// SEC-001 FIX (CodeRabbit): Token moved to env var — never hardcoded in source.
-// SEC-002 FIX (CodeRabbit): Azure endpoint moved to env var.
+// Context Fix v1.0: enforceContextIsolation added + safe async response pattern.
+// SEC-001: Token from env. SEC-002: Azure endpoint from env. LOG-002: validated flag fixed.
 
 const NEXUS_TOKEN = Deno.env.get("NEXUS_PORTAL_TOKEN") || "";
-const NEXUS_URL = "https://app.base44.com/api/apps/6a1c237bd9f5ff04b6ac7a73";
+const NEXUS_APP_ID = "6a1c237bd9f5ff04b6ac7a73";
+const NEXUS_URL = `https://app.base44.com/api/apps/${NEXUS_APP_ID}`;
 
 const AZURE_ENDPOINT = Deno.env.get("AZURE_OPENAI_ENDPOINT") || "https://kiera-mpv1nhzc-eastus2.cognitiveservices.azure.com/";
 const AZURE_DEPLOYMENT = "gpt-4o";
 const AZURE_API_VERSION = "2025-01-01-preview";
 
-// ─── TYPE-001 FIX (CodeRabbit): Shared typed M365 interface ──────────────────
 interface M365Hit {
   resource?: { subject?: string; name?: string };
   summary?: string;
 }
 
-// ─── ERR-002 FIX (CodeRabbit): postToNexus with error surfacing ──────────────
+// ─── CONTEXT ISOLATION v1.0 ───────────────────────────────────────────────────
+// Blocks any question referencing a foreign Base44 app ID (24-char hex).
+// Mirrors the same logic in aiCommandCentre for consistency.
+function enforceContextIsolation(
+  appId: string,
+  question: string
+): { error: boolean; message?: string; scopedQuestion?: string } {
+
+  const appIdPattern = /\b[0-9a-f]{24}\b/g;
+  const referencedIds = question.match(appIdPattern) || [];
+
+  for (const id of referencedIds) {
+    if (id !== appId) {
+      return {
+        error: true,
+        message: `Cross-app reference blocked. Question references app ${id} which is outside the current scope (${appId}). Use target_app_id payload field instead.`,
+      };
+    }
+  }
+
+  return { error: false, scopedQuestion: `[APP:${appId}] ${question}` };
+}
+
+// ─── SAFE ASYNC WRITER — always responds, never hangs ────────────────────────
 async function postToNexus(entity: string, data: object): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${NEXUS_URL}/entities/${entity}`, {
@@ -40,7 +63,6 @@ async function postToNexus(entity: string, data: object): Promise<{ ok: boolean;
   }
 }
 
-// ─── STYLE-001 FIX (CodeRabbit): max_tokens raised to 2000 for full reports ──
 async function callAzureOpenAI(systemPrompt: string, userPrompt: string, apiKey: string): Promise<string> {
   const url = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`;
   const res = await fetch(url, {
@@ -66,6 +88,7 @@ async function callAzureOpenAI(systemPrompt: string, userPrompt: string, apiKey:
   return data.choices?.[0]?.message?.content || "";
 }
 
+// ─── MAIN HANDLER — safe async: always returns Response, never hangs ──────────
 Deno.serve(async (req) => {
   try {
     const base44 = createClientFromRequest(req);
@@ -76,7 +99,14 @@ Deno.serve(async (req) => {
       return Response.json({ error: "No question provided" }, { status: 400 });
     }
 
-    // ── Step 1: Get M365 token and search for relevant context ────────────────
+    // ── ISOLATION CHECK: block cross-app questions ────────────────────────────
+    const isolation = enforceContextIsolation(NEXUS_APP_ID, question);
+    if (isolation.error) {
+      return Response.json({ error: isolation.message }, { status: 400 });
+    }
+    const scopedQuestion = isolation.scopedQuestion || question;
+
+    // ── STEP 1: M365 Copilot context (non-blocking) ───────────────────────────
     let m365Token = "";
     let searchContext = "";
 
@@ -103,7 +133,6 @@ Deno.serve(async (req) => {
           }),
         });
         const searchData = await searchRes.json();
-        // TYPE-001 FIX: typed hits
         const hits: M365Hit[] = searchData?.value?.[0]?.hitsContainers?.[0]?.hits || [];
         if (hits.length > 0) {
           searchContext = "\n\nRelevant M365 docs:\n" + hits.map((h) =>
@@ -113,7 +142,7 @@ Deno.serve(async (req) => {
       } catch (_e) {}
     }
 
-    // ── Step 2: Call Azure OpenAI GPT-4o ──────────────────────────────────────
+    // ── STEP 2: Call Azure OpenAI GPT-4o ──────────────────────────────────────
     const azureKey = Deno.env.get("AZURE_OPENAI_API_KEY_3") || "";
     let answer = "";
     let modelUsed = "none";
@@ -121,10 +150,12 @@ Deno.serve(async (req) => {
     const systemPrompt = `You are the VALIDATOR — the final quality gate for the Nexus Command AI Hub (SIMPLEX-ITY, Hong Kong).
 Your role is to review code, plans, and decisions proposed by the AI team before any deployment.
 You are strict, thorough, and impartial. You never approve your own work.
+Hub App ID scope: ${NEXUS_APP_ID}
 Portal stack: React + Base44. Design: #e8e6fe bg, #5e50fb accent, Exo 2/Montserrat fonts.
-Give a structured VALIDATOR REPORT with: VERDICT (APPROVED / REJECTED / NEEDS REVISION), FINDINGS, and RECOMMENDATIONS.`;
+Give a structured VALIDATOR REPORT with: VERDICT (APPROVED / REJECTED / NEEDS REVISION), FINDINGS, and RECOMMENDATIONS.
+Never reference or access any app outside ${NEXUS_APP_ID}.`;
 
-    const userPrompt = question
+    const userPrompt = scopedQuestion
       + (context ? `\n\nContext: ${context}` : "")
       + searchContext;
 
@@ -137,18 +168,18 @@ Give a structured VALIDATOR REPORT with: VERDICT (APPROVED / REJECTED / NEEDS RE
       }
     }
 
-    // ── Step 3: Fallback if Azure fails ───────────────────────────────────────
+    // ── STEP 3: Fallback — always respond ─────────────────────────────────────
     if (!answer) {
       answer = `VALIDATOR REPORT\n\nVERDICT: PENDING\n\nFINDINGS:\nYour question: "${question}"\nM365 search: ${searchContext ? "context found ✅" : "no results"}\nAzure OpenAI: not responding — check AZURE_OPENAI_API_KEY_3.\n\nRECOMMENDATIONS:\nRecheck Azure key and retry.`;
       modelUsed = "pending";
     }
 
-    // ── LOG-002 FIX (CodeRabbit): copilot_validated only true on real APPROVED ─
+    // ── STEP 4: Parse verdict ─────────────────────────────────────────────────
     const isApproved = answer.includes("VERDICT: APPROVED") || answer.includes("APPROVED\n");
     const isRejected = answer.includes("VERDICT: REJECTED") || answer.includes("REJECTED\n");
     const validationStatus = isApproved ? "passed" : isRejected ? "failed" : "review";
 
-    // ── Step 4: Write ONLY to Nexus Command — with error handling (ERR-002) ───
+    // ── STEP 5: Write to Nexus — SChatMessage ─────────────────────────────────
     const chatWrite = await postToNexus("SChatMessage", {
       sender: "VALIDATOR (Copilot)",
       sender_type: "ai",
@@ -159,6 +190,7 @@ Give a structured VALIDATOR REPORT with: VERDICT (APPROVED / REJECTED / NEEDS RE
     });
     if (!chatWrite.ok) console.error("SChatMessage write failed:", chatWrite.error);
 
+    // ── STEP 6: Write to Nexus — TestLog ──────────────────────────────────────
     const logWrite = await postToNexus("TestLog", {
       test_name: question.slice(0, 60),
       status: validationStatus,
@@ -166,12 +198,12 @@ Give a structured VALIDATOR REPORT with: VERDICT (APPROVED / REJECTED / NEEDS RE
       tested_at: new Date().toISOString(),
       validator: "VALIDATOR (Azure GPT-4o)",
       simpee_validated: false,
-      // LOG-002 FIX: only true on genuine APPROVED verdict
-      copilot_validated: isApproved,
+      copilot_validated: isApproved, // LOG-002: only true on genuine APPROVED verdict
       fixed: isApproved,
     });
     if (!logWrite.ok) console.error("TestLog write failed:", logWrite.error);
 
+    // ── SAFE ASYNC RESPONSE — always fires ────────────────────────────────────
     return Response.json({
       success: true,
       answer,
@@ -185,6 +217,7 @@ Give a structured VALIDATOR REPORT with: VERDICT (APPROVED / REJECTED / NEEDS RE
     });
 
   } catch (error: any) {
+    // Always return — never let the channel close without a response
     return Response.json({ error: error.message }, { status: 500 });
   }
 });
