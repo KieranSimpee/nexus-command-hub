@@ -9,7 +9,7 @@ import { createClientFromRequest } from 'npm:@base44/sdk@0.8.25';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const NEXUS_URL = "https://app.base44.com/api/apps/6a1c237bd9f5ff04b6ac7a73";
-const NEXUS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJraWVyYW5ANXNlbnNlcy5nbG9iYWwiLCJleHAiOjE3ODc0MDg1NTMsImlhdCI6MTc3OTYzMjU1M30.feQst8q8CvGtFAlpy-Yl6Gp7qKVw84FPsbrK2oUAhFg";
+const NEXUS_TOKEN = Deno.env.get("NEXUS_PORTAL_TOKEN") || "";
 
 async function postToNexus(entity: string, data: object) {
   const res = await fetch(`${NEXUS_URL}/entities/${entity}`, {
