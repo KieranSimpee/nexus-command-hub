@@ -1,5 +1,5 @@
 const REPO = "KieranSimpee/nexus-command-hub";
-const NEXUS_TOKEN = Deno.env.get("NEXUS_PORTAL_TOKEN") || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJraWVyYW5ANXNlbnNlcy5nbG9iYWwiLCJleHAiOjE3ODc0MDg1NTMsImlhdCI6MTc3OTYzMjU1M30.feQst8q8CvGtFAlpy-Yl6Gp7qKVw84FPsbrK2oUAhFg";
+const NEXUS_TOKEN = Deno.env.get("NEXUS_PORTAL_TOKEN") || "";
 const NEXUS_APP = "6a1c237bd9f5ff04b6ac7a73";
 const BASE_URL = `https://app.base44.com/api/apps/${NEXUS_APP}/entities`;
 
